@@ -190,8 +190,9 @@ def run_crawler(
     results: list[dict[str, Any]] = []
 
     with sync_playwright() as p:
-        context: BrowserContext
+        context: BrowserContext | None = None
         browser = None
+        context_kwargs: dict[str, Any] = {}
         if browser_type == "chrome":
             launcher = p.chromium
             launch_kwargs = {"channel": "chrome"}
@@ -210,13 +211,11 @@ def run_crawler(
                 headless=headless,
                 **launch_kwargs,
             )
-            page = context.pages[0] if context.pages else context.new_page()
         else:
             browser = launcher.launch(
                 headless=headless,
                 **launch_kwargs,
             )
-            context_kwargs = {}
             if storage_state_path and Path(storage_state_path).exists():
                 logger.info(
                     "Loading existing storage state from: %s", storage_state_path
@@ -224,17 +223,30 @@ def run_crawler(
                 context_kwargs["storage_state"] = str(
                     Path(storage_state_path).resolve()
                 )
-            context = browser.new_context(**context_kwargs)
-            page = context.new_page()
 
         try:
             poll_count = 0
             while True:
                 poll_count += 1
                 current_results = []
-                for product_id in product_ids:
-                    res = crawl_product(page, product_id, timeout=timeout)
-                    current_results.append(res)
+
+                if context:
+                    page = context.new_page()
+                    try:
+                        for product_id in product_ids:
+                            res = crawl_product(page, product_id, timeout=timeout)
+                            current_results.append(res)
+                    finally:
+                        page.close()
+                else:
+                    cycle_context = browser.new_context(**context_kwargs)
+                    cycle_page = cycle_context.new_page()
+                    try:
+                        for product_id in product_ids:
+                            res = crawl_product(cycle_page, product_id, timeout=timeout)
+                            current_results.append(res)
+                    finally:
+                        cycle_context.close()
 
                 results = current_results
                 if on_poll:
@@ -248,7 +260,8 @@ def run_crawler(
         except KeyboardInterrupt:
             logger.info("Polling stopped by user.")
         finally:
-            context.close()
+            if context:
+                context.close()
             if browser:
                 browser.close()
 
