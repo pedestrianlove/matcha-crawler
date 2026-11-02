@@ -4,16 +4,19 @@ import argparse
 import json
 import logging
 import os
-import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 from crawler.parser import parse_product_page_html
 
-BASE_PRODUCT_URL = "https://www.marukyu-koyamaen.co.jp/english/shop/products/{product_id}"
+BASE_PRODUCT_URL = (
+    "https://www.marukyu-koyamaen.co.jp/english/shop/products/{product_id}"
+)
 TARGET_DOMAIN = urlparse(BASE_PRODUCT_URL).hostname.replace("www.", "")
 
 logger = logging.getLogger(__name__)
@@ -24,7 +27,7 @@ def build_product_url(product_id: str) -> str:
     return BASE_PRODUCT_URL.format(product_id=product_id.strip())
 
 
-def load_product_ids(filepath: str | Path) -> List[str]:
+def load_product_ids(filepath: str | Path) -> list[str]:
     """Load product IDs from a JSON file containing an array of strings."""
     path = Path(filepath)
     if not path.exists():
@@ -48,12 +51,16 @@ def import_session_credentials(target_domain: str, output_path: Path) -> Path:
     import sqlite3
     import tempfile
 
-    searched_paths: List[str] = []
+    searched_paths: list[str] = []
 
     # 1. Firefox profiles
     ff_dir = Path(os.path.expandvars(r"%APPDATA%\Mozilla\Firefox\Profiles"))
     if ff_dir.exists():
-        for p in sorted(ff_dir.iterdir(), key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True):
+        for p in sorted(
+            ff_dir.iterdir(),
+            key=lambda x: x.stat().st_mtime if x.exists() else 0,
+            reverse=True,
+        ):
             db = p / "cookies.sqlite"
             if db.exists():
                 searched_paths.append(str(db))
@@ -81,18 +88,28 @@ def import_session_credentials(target_domain: str, output_path: Path) -> Path:
                             exp = r[4]
                             if exp and exp > 1e11:
                                 exp = exp / 1000
-                            cookies.append({
-                                "name": r[1],
-                                "value": r[2],
-                                "domain": r[0],
-                                "path": r[3],
-                                "expires": float(exp) if exp else -1,
-                                "httpOnly": bool(r[6]),
-                                "secure": secure,
-                                "sameSite": ss,
-                            })
-                        output_path.write_text(json.dumps({"cookies": cookies, "origins": []}, indent=2), encoding="utf-8")
-                        logger.info("Imported %d cookies from %s into %s", len(cookies), db, output_path)
+                            cookies.append(
+                                {
+                                    "name": r[1],
+                                    "value": r[2],
+                                    "domain": r[0],
+                                    "path": r[3],
+                                    "expires": float(exp) if exp else -1,
+                                    "httpOnly": bool(r[6]),
+                                    "secure": secure,
+                                    "sameSite": ss,
+                                }
+                            )
+                        output_path.write_text(
+                            json.dumps({"cookies": cookies, "origins": []}, indent=2),
+                            encoding="utf-8",
+                        )
+                        logger.info(
+                            "Imported %d cookies from %s into %s",
+                            len(cookies),
+                            db,
+                            output_path,
+                        )
                         return output_path
 
     # 2. Chrome profiles (for path reporting if not found)
@@ -103,7 +120,11 @@ def import_session_credentials(target_domain: str, output_path: Path) -> Path:
             if db.exists():
                 searched_paths.append(str(db))
 
-    paths_str = "\n".join(f"  - {p}" for p in searched_paths) if searched_paths else "  (none found)"
+    paths_str = (
+        "\n".join(f"  - {p}" for p in searched_paths)
+        if searched_paths
+        else "  (none found)"
+    )
     raise RuntimeError(
         f"No credentials or Cloudflare challenge clearance found for '{target_domain}'.\n"
         f"Please log in or solve the Cloudflare challenge in your browser first.\n"
@@ -111,7 +132,7 @@ def import_session_credentials(target_domain: str, output_path: Path) -> Path:
     )
 
 
-def crawl_product(page: Page, product_id: str, timeout: int = 30000) -> Dict[str, Any]:
+def crawl_product(page: Page, product_id: str, timeout: int = 30000) -> dict[str, Any]:
     """Crawl a single product page and return varieties stock status."""
     url = build_product_url(product_id)
     logger.info("Crawling %s (url: %s)...", product_id, url)
@@ -120,9 +141,13 @@ def crawl_product(page: Page, product_id: str, timeout: int = 30000) -> Dict[str
         page.goto(url, timeout=timeout, wait_until="domcontentloaded")
         # Wait for either .product-form-rows or single_add_to_cart_button or network idle
         try:
-            page.wait_for_selector(".product-form-rows, .product-form-row", timeout=5000)
+            page.wait_for_selector(
+                ".product-form-rows, .product-form-row", timeout=5000
+            )
         except Exception:
-            logger.debug("Selector wait timed out or not immediately visible for %s", product_id)
+            logger.debug(
+                "Selector wait timed out or not immediately visible for %s", product_id
+            )
 
         content = page.content()
         varieties = parse_product_page_html(content)
@@ -145,20 +170,24 @@ def crawl_product(page: Page, product_id: str, timeout: int = 30000) -> Dict[str
 
 
 def run_crawler(
-    product_ids: List[str],
-    user_data_dir: Optional[str] = None,
-    storage_state_path: Optional[str] = None,
+    product_ids: list[str],
+    user_data_dir: str | None = None,
+    storage_state_path: str | None = None,
     headless: bool = True,
     timeout: int = 30000,
     browser_type: str = "firefox",
-) -> List[Dict[str, Any]]:
+    poll: bool = False,
+    interval: float = 15.0,
+    max_polls: int | None = None,
+    on_poll: Callable[[list[dict[str, Any]]], None] | None = None,
+) -> list[dict[str, Any]]:
     """Run crawler over a list of product IDs using Playwright.
 
     Supports reusing existing authenticated browser sessions via:
     1. Persistent user data directory (e.g. ~/.config/google-chrome, or ./browser_profile)
     2. Saved Playwright storage_state (cookies/session JSON file)
     """
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     with sync_playwright() as p:
         context: BrowserContext
@@ -189,15 +218,35 @@ def run_crawler(
             )
             context_kwargs = {}
             if storage_state_path and Path(storage_state_path).exists():
-                logger.info("Loading existing storage state from: %s", storage_state_path)
-                context_kwargs["storage_state"] = str(Path(storage_state_path).resolve())
+                logger.info(
+                    "Loading existing storage state from: %s", storage_state_path
+                )
+                context_kwargs["storage_state"] = str(
+                    Path(storage_state_path).resolve()
+                )
             context = browser.new_context(**context_kwargs)
             page = context.new_page()
 
         try:
-            for product_id in product_ids:
-                res = crawl_product(page, product_id, timeout=timeout)
-                results.append(res)
+            poll_count = 0
+            while True:
+                poll_count += 1
+                current_results = []
+                for product_id in product_ids:
+                    res = crawl_product(page, product_id, timeout=timeout)
+                    current_results.append(res)
+
+                results = current_results
+                if on_poll:
+                    on_poll(results)
+
+                if not poll or (max_polls is not None and poll_count >= max_polls):
+                    break
+
+                logger.info("Waiting %.1fs until next poll...", interval)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            logger.info("Polling stopped by user.")
         finally:
             context.close()
             if browser:
@@ -245,6 +294,17 @@ def main() -> None:
         help="Run browser in headed mode (default is headless)",
     )
     parser.add_argument(
+        "--poll",
+        action="store_true",
+        help="Continuously poll product stock at a periodic interval",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=15.0,
+        help="Polling interval in seconds (default: 15.0)",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=30000,
@@ -271,6 +331,14 @@ def main() -> None:
         if not state_file.exists():
             import_session_credentials(TARGET_DOMAIN, state_file)
 
+    def handle_result(res: list[dict[str, Any]]) -> None:
+        output_json = json.dumps(res, indent=2, ensure_ascii=False)
+        if args.output:
+            Path(args.output).write_text(output_json, encoding="utf-8")
+            logger.info("Saved output to %s", args.output)
+        else:
+            print(output_json)
+
     results = run_crawler(
         product_ids=product_ids,
         user_data_dir=args.user_data_dir,
@@ -278,14 +346,13 @@ def main() -> None:
         headless=not args.headed,
         timeout=args.timeout,
         browser_type=args.browser,
+        poll=args.poll,
+        interval=args.interval,
+        on_poll=handle_result if args.poll else None,
     )
 
-    output_json = json.dumps(results, indent=2, ensure_ascii=False)
-    if args.output:
-        Path(args.output).write_text(output_json, encoding="utf-8")
-        logger.info("Saved output to %s", args.output)
-    else:
-        print(output_json)
+    if not args.poll:
+        handle_result(results)
 
 
 if __name__ == "__main__":
