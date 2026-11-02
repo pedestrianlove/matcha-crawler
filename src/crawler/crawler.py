@@ -7,12 +7,14 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 from crawler.parser import parse_product_page_html
 
 BASE_PRODUCT_URL = "https://www.marukyu-koyamaen.co.jp/english/shop/products/{product_id}"
+TARGET_DOMAIN = urlparse(BASE_PRODUCT_URL).hostname.replace("www.", "")
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,78 @@ def load_product_ids(filepath: str | Path) -> List[str]:
         raise ValueError(f"Expected a JSON array of product IDs in {filepath}")
 
     return [str(pid).strip() for pid in data if pid]
+
+
+def import_session_credentials(target_domain: str, output_path: Path) -> Path:
+    """Import target_domain cookies from browser profiles into session.json.
+
+    Raises RuntimeError listing searched paths if no credentials found.
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+
+    searched_paths: List[str] = []
+
+    # 1. Firefox profiles
+    ff_dir = Path(os.path.expandvars(r"%APPDATA%\Mozilla\Firefox\Profiles"))
+    if ff_dir.exists():
+        for p in sorted(ff_dir.iterdir(), key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True):
+            db = p / "cookies.sqlite"
+            if db.exists():
+                searched_paths.append(str(db))
+                with tempfile.TemporaryDirectory() as tmp:
+                    temp_db = Path(tmp) / "cookies.sqlite"
+                    shutil.copy2(db, temp_db)
+                    conn = sqlite3.connect(temp_db)
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT host, name, value, path, expiry, isSecure, isHttpOnly, sameSite "
+                        "FROM moz_cookies WHERE host LIKE ?",
+                        (f"%{target_domain}%",),
+                    )
+                    rows = cursor.fetchall()
+                    conn.close()
+
+                    if rows:
+                        cookies = []
+                        same_site_map = {0: "None", 1: "Lax", 2: "Strict"}
+                        for r in rows:
+                            secure = bool(r[5])
+                            ss = same_site_map.get(r[7], "Lax")
+                            if ss == "None" and not secure:
+                                ss = "Lax"
+                            exp = r[4]
+                            if exp and exp > 1e11:
+                                exp = exp / 1000
+                            cookies.append({
+                                "name": r[1],
+                                "value": r[2],
+                                "domain": r[0],
+                                "path": r[3],
+                                "expires": float(exp) if exp else -1,
+                                "httpOnly": bool(r[6]),
+                                "secure": secure,
+                                "sameSite": ss,
+                            })
+                        output_path.write_text(json.dumps({"cookies": cookies, "origins": []}, indent=2), encoding="utf-8")
+                        logger.info("Imported %d cookies from %s into %s", len(cookies), db, output_path)
+                        return output_path
+
+    # 2. Chrome profiles (for path reporting if not found)
+    chrome_dir = Path(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data"))
+    if chrome_dir.exists():
+        for item in chrome_dir.iterdir():
+            db = item / "Network" / "Cookies"
+            if db.exists():
+                searched_paths.append(str(db))
+
+    paths_str = "\n".join(f"  - {p}" for p in searched_paths) if searched_paths else "  (none found)"
+    raise RuntimeError(
+        f"No credentials or Cloudflare challenge clearance found for '{target_domain}'.\n"
+        f"Please log in or solve the Cloudflare challenge in your browser first.\n"
+        f"Searched paths:\n{paths_str}"
+    )
 
 
 def crawl_product(page: Page, product_id: str, timeout: int = 30000) -> Dict[str, Any]:
@@ -76,6 +150,7 @@ def run_crawler(
     storage_state_path: Optional[str] = None,
     headless: bool = True,
     timeout: int = 30000,
+    browser_type: str = "firefox",
 ) -> List[Dict[str, Any]]:
     """Run crawler over a list of product IDs using Playwright.
 
@@ -88,20 +163,29 @@ def run_crawler(
     with sync_playwright() as p:
         context: BrowserContext
         browser = None
+        if browser_type == "chrome":
+            launcher = p.chromium
+            launch_kwargs = {"channel": "chrome"}
+        elif browser_type == "chromium":
+            launcher = p.chromium
+            launch_kwargs = {}
+        else:
+            launcher = p.firefox
+            launch_kwargs = {}
 
         if user_data_dir:
             user_data_path = str(Path(user_data_dir).expanduser().resolve())
             logger.info("Using persistent browser context at: %s", user_data_path)
-            context = p.firefox.launch_persistent_context(
+            context = launcher.launch_persistent_context(
                 user_data_dir=user_data_path,
                 headless=headless,
-                args=["--no-sandbox", "--disable-setuid-sandbox"],
+                **launch_kwargs,
             )
             page = context.pages[0] if context.pages else context.new_page()
         else:
-            browser = p.firefox.launch(
+            browser = launcher.launch(
                 headless=headless,
-                args=["--no-sandbox", "--disable-setuid-sandbox"],
+                **launch_kwargs,
             )
             context_kwargs = {}
             if storage_state_path and Path(storage_state_path).exists():
@@ -140,6 +224,12 @@ def main() -> None:
         help="Path to output JSON file (default: stdout)",
     )
     parser.add_argument(
+        "--browser",
+        default="firefox",
+        choices=["firefox", "chromium", "chrome"],
+        help="Browser backend: firefox, chromium, or chrome (default: firefox)",
+    )
+    parser.add_argument(
         "--user-data-dir",
         default=os.environ.get("CHROME_USER_DATA_DIR"),
         help="Path to browser user data directory for persistent authenticated session",
@@ -175,12 +265,19 @@ def main() -> None:
     )
 
     product_ids = load_product_ids(args.products)
+    storage_state_path = args.storage_state
+    if not args.user_data_dir:
+        state_file = Path(storage_state_path)
+        if not state_file.exists():
+            import_session_credentials(TARGET_DOMAIN, state_file)
+
     results = run_crawler(
         product_ids=product_ids,
         user_data_dir=args.user_data_dir,
         storage_state_path=args.storage_state,
         headless=not args.headed,
         timeout=args.timeout,
+        browser_type=args.browser,
     )
 
     output_json = json.dumps(results, indent=2, ensure_ascii=False)

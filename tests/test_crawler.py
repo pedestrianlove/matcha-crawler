@@ -8,6 +8,7 @@ from playwright.sync_api import sync_playwright
 from crawler.crawler import (
     build_product_url,
     crawl_product,
+    import_session_credentials,
     load_product_ids,
     run_crawler,
 )
@@ -94,4 +95,15 @@ def test_run_crawler_with_mocked_route(tmp_path: Path):
         assert res["status"] == "success"
         assert res["varieties"][0]["in_stock"] is True
         assert res["varieties"][1]["in_stock"] is False
+
         browser.close()
+
+
+
+def test_import_session_credentials_missing_raises_error(tmp_path: Path):
+    output_path = tmp_path / "session.json"
+    with pytest.raises(RuntimeError) as exc_info:
+        import_session_credentials("nonexistent-test-domain.xyz", output_path)
+
+    assert "Searched paths:" in str(exc_info.value)
+    assert "nonexistent-test-domain.xyz" in str(exc_info.value)
