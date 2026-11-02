@@ -92,14 +92,14 @@ def run_crawler(
         if user_data_dir:
             user_data_path = str(Path(user_data_dir).expanduser().resolve())
             logger.info("Using persistent browser context at: %s", user_data_path)
-            context = p.chromium.launch_persistent_context(
+            context = p.firefox.launch_persistent_context(
                 user_data_dir=user_data_path,
                 headless=headless,
                 args=["--no-sandbox", "--disable-setuid-sandbox"],
             )
             page = context.pages[0] if context.pages else context.new_page()
         else:
-            browser = p.chromium.launch(
+            browser = p.firefox.launch(
                 headless=headless,
                 args=["--no-sandbox", "--disable-setuid-sandbox"],
             )

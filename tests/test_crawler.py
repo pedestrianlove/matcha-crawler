@@ -40,7 +40,7 @@ def test_crawl_product_with_mocked_route():
     target_url = build_product_url(product_id)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        browser = p.firefox.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context()
         page = context.new_page()
 
@@ -77,7 +77,7 @@ def test_run_crawler_with_mocked_route(tmp_path: Path):
     target_url = build_product_url("1151020c1")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        browser = p.firefox.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context()
         page = context.new_page()
 
