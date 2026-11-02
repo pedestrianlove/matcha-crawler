@@ -1,0 +1,26 @@
+[project]
+name = "crawler"
+version = "0.1.0"
+description = "Autonomous crawler for Marukyu Koyamaen product variety stock status"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.12.0",
+    "playwright>=1.40.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crawler"]
+
+[project.scripts]
+crawler = "crawler.crawler:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+asyncio_default_fixture_loop_scope = "function"
