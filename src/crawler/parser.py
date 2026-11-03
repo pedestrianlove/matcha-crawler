@@ -51,6 +51,13 @@ def parse_variety_row(row: Tag) -> Dict[str, Any]:
     }
 
 
+def parse_product_title(html_content: str) -> str:
+    """Return the text content of the `.product_title` element, or empty string."""
+    soup = BeautifulSoup(html_content, "html.parser")
+    el = soup.select_one(".product_title")
+    return el.get_text(strip=True) if el else ""
+
+
 def parse_product_page_html(html_content: str) -> List[Dict[str, Any]]:
     """Parse product page HTML and return list of varieties and their stock status.
 

@@ -135,3 +135,12 @@ def test_parse_button_missing():
     result = parse_variety_row(row)
     assert result["variety"] == "Special Pack"
     assert result["in_stock"] is False
+
+
+
+def test_parse_product_title():
+    from crawler.parser import parse_product_title
+
+    assert parse_product_title('<h1 class="product_title"> Matcha Tin </h1>') == 'Matcha Tin'
+    assert parse_product_title('<p></p>') == ''
+

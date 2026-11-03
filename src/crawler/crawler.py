@@ -12,7 +12,8 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 
-from crawler.parser import parse_product_page_html
+from crawler.notifier import PlyerNotifier, StockTracker
+from crawler.parser import parse_product_page_html, parse_product_title
 
 BASE_PRODUCT_URL = (
     "https://www.marukyu-koyamaen.co.jp/english/shop/products/{product_id}"
@@ -154,6 +155,7 @@ def crawl_product(page: Page, product_id: str, timeout: int = 30000) -> dict[str
 
         return {
             "product_id": product_id,
+            "title": parse_product_title(content),
             "url": url,
             "status": "success",
             "varieties": varieties,
@@ -162,6 +164,7 @@ def crawl_product(page: Page, product_id: str, timeout: int = 30000) -> dict[str
         logger.error("Failed to crawl product %s: %s", product_id, e)
         return {
             "product_id": product_id,
+            "title": "",
             "url": url,
             "status": "error",
             "error": str(e),
@@ -352,6 +355,12 @@ def main() -> None:
         else:
             print(output_json)
 
+    tracker = StockTracker(PlyerNotifier())
+
+    def handle_poll(res: list[dict[str, Any]]) -> None:
+        handle_result(res)
+        tracker.update(res)
+
     results = run_crawler(
         product_ids=product_ids,
         user_data_dir=args.user_data_dir,
@@ -361,7 +370,7 @@ def main() -> None:
         browser_type=args.browser,
         poll=args.poll,
         interval=args.interval,
-        on_poll=handle_result if args.poll else None,
+        on_poll=handle_poll if args.poll else None,
     )
 
     if not args.poll:
